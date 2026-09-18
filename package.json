@@ -1,0 +1,14 @@
+{
+  "name": "@boilerplate/manager-machine",
+  "version": "1.0.0",
+  "description": "Manager-machine boilerplate: SQLite-WAL-only-truth orchestration machinery (supervisor, registry FSM, watchdog, reconcile tick, pools, gating). Extracted law-faithfully; battery-pinned.",
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "bun test test/",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "peerDependencies": {
+    "typescript": ">=5.0.0"
+  }
+}
