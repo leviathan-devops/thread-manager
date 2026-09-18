@@ -1,9 +1,11 @@
 // main.ts — the threads-manager runner (OMP corpus flavor).
 // Commands: tick (one reconcile) · stale (the raise report) · daemon (20m cadence, flock-led)
 // Kill path: stop the daemon (hub stop threads-manager) + rm -rf ~/.omp/threads/thread-manager/store.sqlite*
-import { Supervisor } from "./src/index.js";
+import { Supervisor, REGISTRY_DDL } from "./src/index.js";
+import { ManagerStore } from "./src/state.js";
 import { Journal } from "./src/journal.js";
-import { buildFleet, THREADS_STORE } from "./fleet.ts";
+import { buildFleet, THREADS_STORE, mintThreadDb } from "./fleet.ts";
+import { AuthRegistry } from "./src/registry.js";
 import { openSync, closeSync, unlinkSync } from "node:fs";
 
 const LOCK = "/tmp/omp-threads-manager.lock";
@@ -15,6 +17,33 @@ function acquireLeader(): boolean {
   catch { return false; } // O_EXCL: second tick loses the election
 }
 function releaseLeader(): void { try { unlinkSync(LOCK); } catch {} }
+
+function ledger(): AuthRegistry {
+  const store = new ManagerStore({ path: DB });
+  store.migrate(REGISTRY_DDL);
+  return new AuthRegistry(store);
+}
+function recordedMints(): Array<{ key: string; status: string }> {
+  const store = new ManagerStore({ path: DB });
+  store.migrate(REGISTRY_DDL);
+  return store.rows("SELECT key, status FROM mm_attempts WHERE status = 'recorded'") as Array<{ key: string; status: string }>;
+}
+
+/** RESUME SWEEP: crash-first rows (recorded, never accepted) re-fire first.
+ *  Lock-free: mints are atomic renames — safe even beside the daemon. */
+async function resumeSweep(): Promise<number> {
+  const reg = ledger();
+  const pending = recordedMints();
+  let n = 0;
+  for (const a of pending) {
+    if (a.status !== "recorded" || !a.key.startsWith("mint:")) continue;
+    mintThreadDb(a.key.slice(5));
+    reg.accept(a.key);
+    n++;
+    console.log("  RESUME re-fired:", a.key);
+  }
+  return n;
+}
 
 async function runTick(): Promise<void> {
   if (!acquireLeader()) { console.log("TICK YIELDED: another tick holds the leader lock"); return; }
@@ -29,7 +58,11 @@ async function runTick(): Promise<void> {
         const drift = await p.observe();
         if (drift === null) continue;
         if (p.heal) {
+          const reg = ledger();
+          const key = `mint:${p.id.replace("per-thread-db:", "")}`;
+          if (p.id.startsWith("per-thread-db:")) reg.record(key);
           const evidence = await p.heal(drift);
+          if (p.id.startsWith("per-thread-db:")) reg.accept(key);
           healed++;
           lines.push(`HEAL ${p.id}: ${evidence}`);
           journal.append({ at: new Date().toISOString(), kind: "heal", id: p.id, detail: evidence });
@@ -59,7 +92,8 @@ function runStale(): void {
 }
 
 const cmd = process.argv[2] ?? "tick";
-if (cmd === "tick") await runTick();
+if (cmd === "resume") { const n = await resumeSweep(); console.log(`resume sweep complete: ${n} re-fired`); }
+else if (cmd === "tick") await runTick();
 else if (cmd === "stale") runStale();
 else if (cmd === "daemon") {
   if (!acquireLeader()) { console.error("another daemon holds the lock"); process.exit(1); }
